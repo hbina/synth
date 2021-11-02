@@ -5,6 +5,7 @@ use serde_json::{Map, Number, Value};
 
 use std::collections::HashSet;
 use std::fmt::Display;
+use std::iter::FromIterator;
 
 pub mod value;
 pub use value::ValueMergeStrategy;
@@ -74,6 +75,45 @@ impl MergeStrategy<Content, Value> for OptionalMergeStrategy {
                 master.kind(),
                 candidate.kind()
             )),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct VariationMergeStrategy;
+
+impl std::fmt::Display for VariationMergeStrategy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "VariationMergeStrategy")
+    }
+}
+
+impl MergeStrategy<Content, Value> for VariationMergeStrategy {
+    fn try_merge(self, master: &mut Content, candidate: &Value) -> Result<()> {
+        match (master, candidate) {
+            (Content::Array(ArrayContent { content, length }), Value::Array(candidate)) => {
+                Self.try_merge(length.as_mut(), &Value::from(candidate.len()))?;
+                candidate
+                    .iter()
+                    .try_for_each(|value| Self.try_merge(content.as_mut(), value))
+            }
+            (Content::OneOf(master), candidate) => {
+                master.insert_with(OptionalMergeStrategy, candidate);
+                Ok(())
+            }
+            (Content::String(_), Value::String(_)) => Ok(()),
+            (Content::DateTime(_), Value::String(_)) => Ok(()),
+            (Content::Number(_), Value::Number(_)) => Ok(()),
+            (Content::Bool(_), Value::Bool(_)) => Ok(()),
+            (Content::Null(_), Value::Null) => Ok(()),
+            (master, candidate) => {
+                let old_content = std::mem::take(master);
+                *master = Content::OneOf(OneOfContent::from_iter([
+                    old_content,
+                    Content::from(candidate),
+                ]));
+                Ok(())
+            }
         }
     }
 }
@@ -441,13 +481,13 @@ pub mod tests {
         });
 
         let user_no_address = json!({
-                "user_id" : 123,
-                "first_name" : "John",
-                "last_name": "Smith"
+            "user_id" : 123,
+            "first_name" : "John",
+            "last_name": "Smith"
         });
 
-        let user_no_address_as_array = as_array![user_no_address];
         let user_no_last_name_as_array = as_array![user_no_last_name];
+        let user_no_address_as_array = as_array![user_no_address];
 
         let collection_name = Name::from_str("users").unwrap();
         let mut ns = Namespace::default();
@@ -461,6 +501,45 @@ pub mod tests {
         .unwrap();
         ns.try_update(
             OptionalMergeStrategy,
+            &collection_name,
+            &user_no_address_as_array,
+        )
+        .unwrap();
+        assert!(ns
+            .accepts(&collection_name, &user_no_last_name_as_array)
+            .is_ok());
+        assert!(ns
+            .accepts(&collection_name, &user_no_address_as_array)
+            .is_ok());
+    }
+
+    #[test]
+    fn test_merge_into_variations() {
+        let user_no_last_name = json!({
+            "address" : {
+                "location": true,
+            }
+        });
+
+        let user_no_address = json!({
+            "address": false
+        });
+
+        let user_no_last_name_as_array = as_array![user_no_last_name];
+        let user_no_address_as_array = as_array![user_no_address];
+
+        let collection_name = Name::from_str("users").unwrap();
+        let mut ns = Namespace::default();
+        ns.create_collection(&collection_name, &user_no_last_name)
+            .unwrap();
+        ns.try_update(
+            VariationMergeStrategy,
+            &collection_name,
+            &user_no_last_name_as_array,
+        )
+        .unwrap();
+        ns.try_update(
+            VariationMergeStrategy,
             &collection_name,
             &user_no_address_as_array,
         )
